@@ -264,6 +264,11 @@
     <div class="seg" id="qual"><button data-v="720">720p</button><button data-v="1080">1080p</button><button data-v="2160">4K</button></div>
   </div>
 
+  <div class="field">
+    <label>What the camera is actually giving you</label>
+    <p class="note" id="diag">checking...</p>
+  </div>
+
   <p class="note">Tap the camera to start or pause scrolling. Drag the arrows to resize the panel, the cross to move it. The screen stays awake while recording.</p>
 </div>
 
@@ -354,16 +359,57 @@ $('useScript').onclick=function(){
 };
 
 /* ---------- camera ---------- */
+var actual={w:0,h:0,fps:0};
+
+function reportActual(){
+  var t=stream&&stream.getVideoTracks()[0];
+  if(!t){actual={w:0,h:0,fps:0};return}
+  var st=t.getSettings?t.getSettings():{};
+  actual={w:st.width||0,h:st.height||0,fps:Math.round(st.frameRate||0)};
+  var el=document.getElementById('diag');
+  if(el) el.textContent = actual.w
+    ? 'Camera is delivering '+actual.w+' x '+actual.h+' at '+actual.fps+'fps'
+    : 'Camera resolution not reported by this browser';
+}
+
 function startCam(){
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
     err("This browser won't allow camera access. Open the page in Safari or Chrome over https.");return}
   if(stream) stream.getTracks().forEach(function(t){t.stop()});
-  var h=S.quality,w=Math.round(h*16/9);
-  navigator.mediaDevices.getUserMedia({
-    video:{facingMode:S.front?'user':'environment',width:{ideal:w},height:{ideal:h}},
-    audio:{echoCancellation:true,noiseSuppression:true}
-  }).then(function(s){stream=s;cam.srcObject=s;cam.classList.toggle('mirror',S.front);clearErr();startMeter(s)})
-   .catch(function(e){err("Camera blocked. Allow camera and microphone for this site, then reload. ("+e.name+")")});
+
+  var h=S.quality, w=Math.round(h*16/9);
+  // Ask hard. Safari treats `ideal` as a hint and will quietly hand back 480p or
+  // less; `min` makes it either honour the request or fail loudly so we can retry.
+  var tiers=[
+    {facingMode:S.front?'user':'environment',
+     width:{min:w,ideal:w},height:{min:h,ideal:h},frameRate:{min:24,ideal:30}},
+    {facingMode:S.front?'user':'environment',
+     width:{min:1280,ideal:w},height:{min:720,ideal:h},frameRate:{ideal:30}},
+    {facingMode:S.front?'user':'environment',width:{ideal:w},height:{ideal:h}},
+    {facingMode:S.front?'user':'environment'}
+  ];
+
+  (function attempt(i){
+    if(i>=tiers.length){
+      err("Camera blocked. Allow camera and microphone for this site, then reload.");return}
+    navigator.mediaDevices.getUserMedia({
+      video:tiers[i],
+      audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:true,sampleRate:48000}
+    }).then(function(s){
+      stream=s;cam.srcObject=s;cam.classList.toggle('mirror',S.front);clearErr();
+      var t=s.getVideoTracks()[0];
+      // One more push: some builds only widen the track after applyConstraints.
+      if(t&&t.applyConstraints){
+        t.applyConstraints({width:{ideal:w},height:{ideal:h},frameRate:{ideal:30}})
+         .catch(function(){}).then(function(){reportActual()});
+      } else reportActual();
+      startMeter(s);
+    }).catch(function(e){
+      if(e&&(e.name==='NotAllowedError'||e.name==='SecurityError')){
+        err("Camera blocked. Allow camera and microphone for this site, then reload.");return}
+      attempt(i+1);
+    });
+  })(0);
 }
 
 function startMeter(s){
@@ -395,6 +441,13 @@ document.addEventListener('visibilitychange',function(){
   if(document.visibilityState==='visible'&&S.recording&&!S.paused)keepAwake(true);
 });
 
+function bitrateFor(h){
+  if(h>=2160) return 40000000;
+  if(h>=1440) return 24000000;
+  if(h>=1080) return 16000000;
+  if(h>=720)  return 9000000;
+  return 5000000;
+}
 function pickMime(){
   var o=['video/mp4;codecs=h264,aac','video/mp4','video/webm;codecs=vp9,opus','video/webm'];
   for(var i=0;i<o.length;i++) if(window.MediaRecorder&&MediaRecorder.isTypeSupported(o[i])) return o[i];
@@ -405,7 +458,7 @@ function beginRec(){
   if(!stream){err("No camera yet. Allow access and reload.");return}
   if(!window.MediaRecorder){err("This browser can't record. Use Safari on iOS or Chrome on Android.");return}
   chunks=[];var m=pickMime();
-  try{mr=m?new MediaRecorder(stream,{mimeType:m,videoBitsPerSecond:S.quality>=2160?24000000:S.quality>=1080?10000000:5000000})
+  try{mr=m?new MediaRecorder(stream,{mimeType:m,videoBitsPerSecond:bitrateFor(actual.h||S.quality)})
           :new MediaRecorder(stream)}
   catch(e){err("Couldn't start recording: "+e.message);return}
   mr.ondataavailable=function(e){if(e.data&&e.data.size)chunks.push(e.data)};
@@ -514,7 +567,7 @@ drag($('gMove'),{get:function(){return panel.getBoundingClientRect().top},
   set:function(t){var px=Math.min(innerHeight*0.5,Math.max(0,t));panel.style.top=px+'px';put('tb.top',px)}});
 
 /* ---------- settings ---------- */
-$('bSettings').onclick=function(){stopRoll();fitNote();$('shSet').hidden=false};
+$('bSettings').onclick=function(){stopRoll();fitNote();reportActual();$('shSet').hidden=false};
 $('closeSet').onclick=function(){$('shSet').hidden=true};
 $('bFlip').onclick=function(){S.front=!S.front;put('tb.front',S.front?'1':'0');startCam()};
 $('fs').addEventListener('input',function(){setSize(+this.value)});
